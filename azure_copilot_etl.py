@@ -1,142 +1,93 @@
 """
-ModelOp Partner ETL Script: Azure M365 Copilot -> ModelOp Center
-================================================================
-INTENDED AUDIENCE: ModelOp Partners & Solutions Engineers
-CONTEXT: ModelOp Partner Demo Lab (Stages 3 & 4)
+ModelOp Partner ETL Script: Enterprise Chatbot Data Generator
+=============================================================
+CONTEXT: ModelOp Partner Demo Lab
+OUTPUT: JSON dataset compatible with ModelOp Standardized Tests.
 
 DESCRIPTION:
-    This script creates the "Model Implementation" data required to demonstrate 
-    ModelOp's LLM Governance capabilities. 
-    
-    It operates in two modes:
-    1. MOCK MODE (Default): Generates synthetic data with intentional defects 
-       (PII, Toxicity, Negative Sentiment) to trigger ModelOp OOTB Monitors.
-    2. LIVE MODE: Connects to your Azure Tenant to pull real Copilot interaction 
-       logs via the Microsoft Graph API.
+    This script creates data for ModelOp Center by either:
+    1. SIMULATING: Generating synthetic chat logs via Ollama (Local AI).
+    2. CONNECTING: Fetching real Microsoft 365 Copilot logs via Azure Graph API.
 
-INSTRUCTIONS:
-    1. Run 'as is' to generate synthetic data for the Demo Lab.
-    2. To use real data, set USE_MOCKS = False and populate the AZURE_CREDENTIALS section.
-    3. Upload the resulting JSON file to the ModelOp Partner Demo Lab.
+CONFIGURATION:
+    All settings (Credentials, Prompts, File Paths) are managed in 'config.yaml'.
+    No user input is required during execution.
 
-AUTHOR: ModelOp Solutions Engineering
+PREREQUISITES:
+  - See requirements.txt
+  - Ensure 'config.yaml' is present in the same directory.
 """
 
 import json
 import random
-import re
 import uuid
-import string
 import time
-import requests # Requires: pip install requests
+import sys
+import re
+import os
+import shutil
+import requests
+import yaml  # Requires pip install PyYAML
 from datetime import datetime, timedelta
-from faker import Faker # Requires: pip install faker
+
+# Third-party imports
+import spacy
+from faker import Faker
+import ollama 
+from tqdm import tqdm 
 
 # =============================================================================
-#  GLOBAL CONFIGURATION (START HERE)
+#  CONFIGURATION LOADER
 # =============================================================================
 
-# TOGGLE THIS TO SWITCH BETWEEN SYNTHETIC AND REAL AZURE DATA
-USE_MOCKS = True 
+CONFIG_FILE = 'config.yaml'
 
-# -----------------------------------------------------------------------------
-# SECTION A: REAL AZURE CREDENTIALS (Used only if USE_MOCKS = False)
-# -----------------------------------------------------------------------------
-# INSTRUCTIONS FOR PARTNERS:
-# 1. Go to Azure Portal > App Registrations: https://portal.azure.com/#view/Microsoft_AAD_IAM/ActiveDirectoryMenuBlade/RegisteredApps
-# 2. Create a New Registration. Copy the Client ID and Tenant ID below.
-# 3. In the App > Certificates & secrets, create a "New client secret" and copy the Value.
-# 4. In the App > API Permissions, add 'Microsoft Graph' -> 'Application permissions' -> 'Chat.Read.All'
-# 5. Grant Admin Consent for the permissions.
+def load_config():
+    if not os.path.exists(CONFIG_FILE):
+        print(f"[!] ERROR: {CONFIG_FILE} not found. Please create it.")
+        sys.exit(1)
+    with open(CONFIG_FILE, 'r') as f:
+        return yaml.safe_load(f)
 
-AZURE_CREDENTIALS = {
-    "TENANT_ID":     "YOUR_TENANT_ID_HERE",     # e.g., "b19c4...", found in Azure AD Overview
-    "CLIENT_ID":     "YOUR_CLIENT_ID_HERE",     # Application (client) ID
-    "CLIENT_SECRET": "YOUR_CLIENT_SECRET_HERE", # Generated Client Secret Value
-    "USER_ID":       "TARGET_USER_ID_OR_EMAIL"  # Optional: Target specific user email to scrape
-}
-
-# -----------------------------------------------------------------------------
-# SECTION B: MOCK DATA SIMULATION SETTINGS (Used only if USE_MOCKS = True)
-# -----------------------------------------------------------------------------
-# These settings control the "Fault Injection" to ensure ModelOp Monitors light up red/yellow.
-# References "Stage 6: Ongoing Monitoring" in the Partner Guide.
-
-MOCK_CONFIG = {
-    "NUM_CHATS": 50,                  # Volume of conversations to generate
-    "COPILOT_AGENT_ID": "modelop-copilot-agent-001",
+def update_config_state(iso_timestamp, last_baseline, last_comparator):
+    """Updates the tracking fields in config.yaml."""
+    current_conf = load_config()
+    current_conf['files']['last_run_timestamp'] = iso_timestamp
+    current_conf['files']['last_used_baseline_file'] = last_baseline
+    current_conf['files']['comparator_source_file'] = last_comparator
     
-    # --- INJECTION RATES (0.0 to 1.0) ---
-    # Higher rates = More alerts in ModelOp Dashboard
-    "PII_RATE": 0.10,                 # 10% of rows contain Fake SSNs (Triggers PII Monitor)
-    "TOXICITY_RATE": 0.05,            # 5% of rows contain insults (Triggers Toxicity Monitor)
-    "GIBBERISH_RATE": 0.05,           # 5% of rows contain nonsense (Triggers Gibberish Monitor)
-    "NEGATIVE_SENTIMENT_RATE": 0.20   # 20% of rows are angry (Triggers Sentiment Monitor)
-}
+    with open(CONFIG_FILE, 'w') as f:
+        yaml.dump(current_conf, f, sort_keys=False, default_flow_style=False)
 
-# Initialize Faker
+# Load initial config
+CONF = load_config()
+
+# =============================================================================
+#  INITIALIZATION
+# =============================================================================
+
+print("\n  > Initializing Faker and Spacy...")
 fake = Faker()
-Faker.seed(4321)
+try:
+    nlp = spacy.load("en_core_web_sm")
+except OSError:
+    print("  [!] Spacy model not found. Downloading en_core_web_sm...")
+    from spacy.cli.download import download
+    download("en_core_web_sm")
+    nlp = spacy.load("en_core_web_sm")
 
 # =============================================================================
-#  HELPER FUNCTIONS
-# =============================================================================
-
-def clean_html(raw_html):
-    """
-    Azure Graph API returns messages wrapped in HTML divs.
-    This strips tags to provide clean text for NLP analysis.
-    """
-    if not raw_html: return ""
-    cleanr = re.compile('<.*?>')
-    cleantext = re.sub(cleanr, '', raw_html)
-    return cleantext.strip()
-
-def get_mock_injected_content(standard_text):
-    """
-    Injects defects into synthetic data to ensure OOTB monitors trigger.
-    """
-    roll = random.random()
-    
-    # 1. Gibberish (Triggers 'Impl_Gib' Monitor)
-    if roll < MOCK_CONFIG["GIBBERISH_RATE"]:
-        noise = ''.join(random.choices(string.ascii_letters + string.digits, k=45))
-        return f"SYSTEM FAULT {noise} {noise}"
-
-    # 2. Toxicity (Triggers 'Impl_Tox' Monitor)
-    elif roll < (MOCK_CONFIG["GIBBERISH_RATE"] + MOCK_CONFIG["TOXICITY_RATE"]):
-        toxic_phrases = [
-            "You are absolutely useless.", "I hate this stupid AI.",
-            "Shut up you terrible software.", "This is an idiotic response."
-        ]
-        return random.choice(toxic_phrases)
-
-    # 3. PII (Triggers 'Impl_PII' Monitor)
-    elif roll < (MOCK_CONFIG["GIBBERISH_RATE"] + MOCK_CONFIG["TOXICITY_RATE"] + MOCK_CONFIG["PII_RATE"]):
-        return f"My SSN is {fake.ssn()} and phone is {fake.phone_number()}."
-
-    # 4. Negative Sentiment (Triggers 'Impl_Sent' Monitor)
-    elif roll < (MOCK_CONFIG["GIBBERISH_RATE"] + MOCK_CONFIG["TOXICITY_RATE"] + 
-                 MOCK_CONFIG["PII_RATE"] + MOCK_CONFIG["NEGATIVE_SENTIMENT_RATE"]):
-        return "I am extremely disappointed and frustrated with this service."
-
-    return standard_text
-
-# =============================================================================
-#  CORE LOGIC: DATA INGESTION
+#  PART 1: AZURE CONNECTION LOGIC (REAL DATA)
 # =============================================================================
 
 def get_azure_access_token():
-    """
-    Authenticates with Azure AD to get a Bearer Token.
-    Endpoint: https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token
-    """
     print("  > Authenticating with Azure Active Directory...")
-    url = f"https://login.microsoftonline.com/{AZURE_CREDENTIALS['TENANT_ID']}/oauth2/v2.0/token"
+    creds = CONF['azure']
+    url = f"https://login.microsoftonline.com/{creds['tenant_id']}/oauth2/v2.0/token"
     
     payload = {
-        'client_id': AZURE_CREDENTIALS['CLIENT_ID'],
-        'client_secret': AZURE_CREDENTIALS['CLIENT_SECRET'],
+        'client_id': creds['client_id'],
+        'client_secret': creds['client_secret'],
         'scope': 'https://graph.microsoft.com/.default',
         'grant_type': 'client_credentials'
     }
@@ -146,19 +97,13 @@ def get_azure_access_token():
         response.raise_for_status()
         return response.json().get('access_token')
     except Exception as e:
-        print(f"  [ERROR] Azure Auth Failed. Check your Client ID/Secret. Details: {e}")
-        exit(1)
+        print(f"  [ERROR] Azure Auth Failed. Check config.yaml credentials. Details: {e}")
+        sys.exit(1)
 
 def fetch_real_azure_data():
-    """
-    Connects to Microsoft Graph API to pull actual chat history.
-    Docs: https://learn.microsoft.com/en-us/graph/api/chat-list
-    """
     token = get_azure_access_token()
     headers = {'Authorization': f'Bearer {token}'}
     
-    # 1. Get List of Chats
-    # Note: In a real production script, you would implement pagination handling (odata.nextLink)
     print("  > Fetching Chat Threads from Microsoft Graph...")
     chats_url = "https://graph.microsoft.com/v1.0/chats" 
     
@@ -173,168 +118,308 @@ def fetch_real_azure_data():
     raw_data = []
     print(f"  > Found {len(chats)} threads. Fetching messages...")
 
-    # 2. Loop through threads and get messages
-    for i, chat in enumerate(chats[:50]): # Limit to 50 for the POC
+    for chat in tqdm(chats[:50], desc="Fetching Azure Threads", unit="thread"): 
         chat_id = chat['id']
         msgs_url = f"https://graph.microsoft.com/v1.0/chats/{chat_id}/messages"
-        msg_resp = requests.get(msgs_url, headers=headers)
         
-        if msg_resp.status_code == 200:
-            messages = msg_resp.json().get('value', [])
-            raw_data.append({
-                "meta": {"id": chat_id, "topic": chat.get('topic', 'No Topic')},
-                "messages": messages
-            })
-        time.sleep(0.2) # Slight delay to respect rate limits
-        
-    return raw_data
-
-def generate_mock_data():
-    """
-    Generates synthetic data mimicking the Azure Graph API Schema.
-    """
-    print(f"  > Generating {MOCK_CONFIG['NUM_CHATS']} synthetic Azure chat threads...")
-    raw_data = []
-    users = [{"id": str(uuid.uuid4()), "name": fake.name()} for _ in range(10)]
-    
-    for _ in range(MOCK_CONFIG["NUM_CHATS"]):
-        user = random.choice(users)
-        chat_id = f"19:{uuid.uuid4()}@thread.v2"
-        base_time = datetime.now() - timedelta(days=random.randint(0, 30))
-        
-        messages = []
-        # Create conversation turns
-        for i in range(random.randint(2, 5)):
-            # User Message
-            user_text = get_mock_injected_content(fake.sentence(nb_words=10))
-            messages.append({
-                "id": str(uuid.uuid4()),
-                "createdDateTime": (base_time + timedelta(minutes=i*5)).isoformat() + "Z",
-                "from": {"user": {"id": user["id"], "displayName": user["name"]}},
-                "body": {"content": f"<div>{user_text}</div>"}
-            })
+        try:
+            msg_resp = requests.get(msgs_url, headers=headers)
+            if msg_resp.status_code == 200:
+                messages = msg_resp.json().get('value', [])
+                raw_data.append({
+                    "meta": {"id": chat_id, "topic": chat.get('topic', 'General Chat')},
+                    "messages": messages
+                })
+        except Exception:
+            continue
+        time.sleep(0.1)
             
-            # Copilot Response
-            bot_text = fake.paragraph(nb_sentences=2)
-            messages.append({
-                "id": str(uuid.uuid4()),
-                "createdDateTime": (base_time + timedelta(minutes=i*5, seconds=30)).isoformat() + "Z",
-                "from": {"user": {"id": MOCK_CONFIG["COPILOT_AGENT_ID"], "displayName": "Copilot"}},
-                "body": {"content": f"<p>{bot_text}</p>"}
-            })
-            
-        raw_data.append({
-            "meta": {"id": chat_id, "topic": "Copilot Help"},
-            "messages": messages
-        })
     return raw_data
 
 # =============================================================================
-#  CORE LOGIC: TRANSFORMATION (ETL)
+#  PART 2: SIMULATION LOGIC (OLLAMA AI)
 # =============================================================================
 
-def transform_to_modelop_schema(raw_data, agent_id):
-    """
-    Transforms the nested Azure JSON into the flat ModelOp Standardized format.
-    """
-    print("  > Transforming data to ModelOp Schema...")
-    modelop_dataset = []
+def check_ollama_status():
+    try:
+        ollama.list()
+        return True
+    except Exception:
+        print("\n[!] ERROR: Ollama is not running or not installed.")
+        return False
+
+def get_spacy_enriched_context():
+    raw_name = fake.name()
+    raw_dept = fake.job()
+    doc = nlp(f"{raw_name} works in {raw_dept}.")
+    person = [ent.text for ent in doc.ents if ent.label_ == "PERSON"]
+    return {
+        "employee_name": person[0] if person else raw_name,
+        "department": raw_dept
+    }
+
+def generate_ai_content(topic):
+    try:
+        context = get_spacy_enriched_context()
+        # LOAD PROMPT FROM YAML
+        system_prompt_template = CONF['prompts']['system_instruction']
+        
+        # Inject dynamic values into the YAML template
+        final_prompt = system_prompt_template.format(
+            employee_name=context['employee_name'],
+            department=context['department'],
+            topic=topic
+        )
+
+        response = ollama.chat(model=CONF['mode']['ollama_model'], messages=[
+            {'role': 'user', 'content': final_prompt},
+        ], format='json')
+        
+        data = json.loads(response['message']['content'])
+        return data['question'], data['response'], data['reference_answer']
+    except Exception:
+        # Fallback
+        return (
+            f"Where can I find the policy on {topic}?", 
+            f"Please refer to the Employee Handbook section regarding {topic}.",
+            f"Corporate Policy 2024-A covers {topic} requirements."
+        )
+
+def inject_defects_into_text(text, field_type):
+    roll = random.random()
+    rates = CONF['simulation']['rates']
     
-    for chat in raw_data:
-        # Ensure chronological order to pair prompts/responses
-        msgs = sorted(chat['messages'], key=lambda x: x.get('createdDateTime', ''))
-        
-        current_prompt = None
-        current_user_id = None
-        
-        for msg in msgs:
-            sender_data = msg.get('from', {}).get('user', {})
-            # Handle cases where sender might be 'application' or null
-            sender_id = sender_data.get('id') if sender_data else "unknown"
-            
-            content = clean_html(msg.get('body', {}).get('content', ''))
-            
-            # LOGIC: If sender is NOT the bot, it's a User Prompt
-            if sender_id != agent_id:
-                current_prompt = content
-                current_user_id = sender_id
-            
-            # LOGIC: If sender IS the bot, and we have a pending prompt, it's a Response
-            elif sender_id == agent_id and current_prompt:
-                
-                # Create "Ground Truth" for SBERT Similarity Monitor
-                # In a real scenario, this might come from a golden dataset.
-                ground_truth = content + " (verified)" 
+    if field_type == "response": 
+        if roll < rates['pii']:
+            ssn = fake.ssn()
+            return text + f" I have updated your profile with SSN {ssn}."
+        elif roll < (rates['pii'] + rates['toxicity']):
+            insults = ["This is a stupid question.", "Read the manual, you idiot."]
+            return f"{random.choice(insults)} {text}"
+    elif field_type == "prompt": 
+        if roll < (rates['pii'] + rates['toxicity'] + rates['negative_sentiment']):
+            prefixes = ["This system is garbage.", "I am furious.", "Why is IT always so slow?"]
+            return f"{random.choice(prefixes)} {text}"
+    return text
 
-                record = {
-                    # --- ModelOp Monitor Requirements ---
-                    # 1. The input/output pair
-                    "prompt": current_prompt,
-                    "response": content,
-                    
-                    # 2. 'score_column' is the primary target for NLP Monitors 
-                    # (Sentiment, Toxicity, PII, Gibberish)
-                    "score_column": content,       
-                    
-                    # 3. 'label_column' is required for Accuracy/Similarity Monitors
-                    "label_column": ground_truth,  
-                    
-                    # 4. 'protected_class' is required for Bias/Fairness Monitors
-                    "protected_class_gender": random.choice(["Male", "Female", "Non-Binary"]),
+def wrap_in_azure_schema(content_text, sender_name, sender_id=None):
+    if not sender_id: sender_id = str(uuid.uuid4())
+    html_content = f"<div><p>{content_text}</p><br></div>"
+    
+    return {
+        "id": str(uuid.uuid4()),
+        "createdDateTime": datetime.now().isoformat() + "Z",
+        "from": {"user": {"id": sender_id, "displayName": sender_name}},
+        "body": {"contentType": "html", "content": html_content}
+    }
 
-                    # --- Metadata for Dashboard Slicing ---
-                    "interaction_id": msg.get('id'),
-                    "timestamp": msg.get('createdDateTime'),
-                    "session_id": chat['meta']['id'],
-                }
-                
-                modelop_dataset.append(record)
-                current_prompt = None # Reset for next turn
+# =============================================================================
+#  PART 3: COMMON ETL LOGIC
+# =============================================================================
 
-    return modelop_dataset
+def clean_azure_html(raw_html):
+    if not raw_html: return ""
+    cleanr = re.compile('<.*?>')
+    cleantext = re.sub(cleanr, '', raw_html)
+    return cleantext.strip()
+
+def transform_raw_azure_to_modelop(raw_prompt_obj, raw_response_obj, reference_answer=None):
+    raw_prompt_html = raw_prompt_obj.get('body', {}).get('content', '')
+    raw_response_html = raw_response_obj.get('body', {}).get('content', '')
+    
+    clean_prompt = clean_azure_html(raw_prompt_html)
+    clean_response = clean_azure_html(raw_response_html)
+    
+    if not reference_answer:
+        reference_answer = "N/A (Real Production Data)"
+
+    return {
+        "interaction_id": raw_prompt_obj.get('id'),
+        "timestamp": raw_prompt_obj.get('createdDateTime'),
+        "session_id": str(uuid.uuid4()),
+        "prompt": clean_prompt,
+        "response": clean_response,
+        "reference_answer": reference_answer,
+        "score_column": clean_response,
+        "label_column": reference_answer,
+        "protected_class_gender": random.choice(["Male", "Female", "Non-Binary"])
+    }
 
 # =============================================================================
 #  MAIN EXECUTION
 # =============================================================================
 
+def run_real_azure_mode():
+    print("\n[MODE] REAL AZURE CONNECTION ACTIVE")
+    bot_id = CONF['azure'].get("bot_user_id")
+    
+    raw_threads = fetch_real_azure_data()
+    if not raw_threads: return []
+
+    dataset = []
+    print("\n  > Processing Azure Threads (ETL)...")
+    
+    for thread in raw_threads:
+        msgs = sorted(thread['messages'], key=lambda x: x.get('createdDateTime', ''))
+        current_prompt = None
+        
+        for msg in msgs:
+            sender_data = msg.get('from', {}).get('user', {})
+            sender_id = sender_data.get('id')
+            
+            if sender_id != bot_id:
+                current_prompt = msg
+            elif sender_id == bot_id and current_prompt:
+                record = transform_raw_azure_to_modelop(current_prompt, msg)
+                dataset.append(record)
+                current_prompt = None
+    return dataset
+
+def run_simulation_mode():
+    print("\n[MODE] MOCK SIMULATION ACTIVE")
+    
+    ai_active = False
+    if CONF['mode']['use_ai_generation']:
+        if check_ollama_status():
+            ai_active = True
+            print("\n" + "="*60)
+            print("  ☕  TIME FOR COFFEE?  ☕")
+            print("  Generating high-quality AI data on CPU.")
+            print(f"  Target: {CONF['simulation']['num_records']} records.")
+            print("="*60 + "\n")
+        else:
+            print("  [!] AI not available. Falling back to fast templates.")
+
+    dataset = []
+    start_time = time.time()
+    num_records = CONF['simulation']['num_records']
+    topics = CONF['simulation']['topics']
+    agent_id = CONF['simulation']['copilot_agent_id']
+    
+    # Updated Progress Bar Format: bar:30 restricts the bar length to 30 chars
+    with tqdm(total=num_records, desc="Generating Data", unit="chat",
+              bar_format="{l_bar}{bar:20}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {postfix}]") as pbar:
+        
+        for i in range(num_records):
+            iter_start = time.time()
+            topic = random.choice(topics)
+            
+            if ai_active:
+                q, a, ref = generate_ai_content(topic)
+            else:
+                q = f"Policy on {topic}?"
+                a = f"See handbook regarding {topic}."
+                ref = "Policy 123."
+
+            q_dirty = inject_defects_into_text(q, "prompt")
+            a_dirty = inject_defects_into_text(a, "response")
+            
+            raw_p = wrap_in_azure_schema(q_dirty, "Employee")
+            raw_r = wrap_in_azure_schema(a_dirty, "Bot", agent_id)
+            
+            record = transform_raw_azure_to_modelop(raw_p, raw_r, ref)
+            dataset.append(record)
+            
+            iter_duration = time.time() - iter_start
+            avg_duration = (time.time() - start_time) / (i + 1)
+            topic_chars = 100
+            q_snip = (q[:topic_chars] + '...') if len(q) > topic_chars else q
+            
+            pbar.set_postfix({
+                "Last": f"{iter_duration:.1f}s",
+                "Avg": f"{avg_duration:.1f}s",
+                "Topic": q_snip
+            })
+            pbar.update(1)
+            
+    return dataset
+
+def manage_files(new_dataset_path):
+    """Handles smart overwriting of baseline and comparator files based on YAML config."""
+    print("\n--- FILE MANAGEMENT ---")
+    file_conf = CONF['files']
+    
+    comparator_final_path = file_conf.get('comparator_source_file', '')
+    baseline_source = file_conf['baseline_source_file']
+    
+    # 1. Handle Comparator (Auto Update)
+    if file_conf['auto_update_comparator']:
+        shutil.copy(new_dataset_path, "comparator_data.json")
+        # Update tracking to point to the newly generated file
+        comparator_final_path = new_dataset_path
+        print(f"  [UPDATE] 'comparator_data.json' updated with latest run data.")
+    else:
+        print(f"  [SKIP] Comparator auto-update is False. 'comparator_data.json' unchanged.")
+
+    # 2. Handle Baseline (Smart Update)
+    # Parse ISO timestamp
+    last_run_str = str(file_conf.get('last_run_timestamp', '1970-01-01T00:00:00.000000'))
+    try:
+        last_run_dt = datetime.fromisoformat(last_run_str)
+        last_run_ts = last_run_dt.timestamp()
+    except ValueError:
+        last_run_ts = 0.0
+        
+    last_file_name = file_conf.get('last_used_baseline_file', '')
+    
+    should_update_baseline = False
+    reason = ""
+
+    if not os.path.exists(baseline_source):
+        print(f"  [WARN] Baseline source '{baseline_source}' does not exist. Skipping baseline update.")
+    else:
+        current_mod_time = os.path.getmtime(baseline_source)
+        
+        # Condition A: Filename changed in YAML
+        if baseline_source != last_file_name:
+            should_update_baseline = True
+            reason = "Filename changed in config.yaml"
+        # Condition B: File content modified since last run
+        elif current_mod_time > last_run_ts:
+            should_update_baseline = True
+            reason = "Source file modified since last run"
+            
+        if should_update_baseline or not os.path.exists("baseline_data.json"):
+            shutil.copy(baseline_source, "baseline_data.json")
+            print(f"  [UPDATE] 'baseline_data.json' updated. Reason: {reason}")
+        else:
+            print(f"  [SKIP] Baseline file unchanged (No config change or file modification detected).")
+
+    # 3. Update Config State
+    update_config_state(datetime.now().isoformat(), baseline_source, comparator_final_path)
+
 def main():
     print("\n--- ModelOp Partner ETL Script Started ---")
     
-    if USE_MOCKS:
-        print("[MODE] MOCK SIMULATION ACTIVE")
-        print("       Generating synthetic data with fault injection.")
-        agent_id = MOCK_CONFIG["COPILOT_AGENT_ID"]
-        raw_data = generate_mock_data()
+    # 1. Generate or Fetch Data
+    if CONF['mode']['use_real_azure']:
+        dataset = run_real_azure_mode()
     else:
-        print("[MODE] REAL AZURE CONNECTION ACTIVE")
-        print("       Connecting to Microsoft Graph API.")
-        # Note: In real Azure calls, the Bot ID needs to be identified. 
-        # Usually, Copilot messages have specific 'application' types, but for this script
-        # we will assume the partner knows the Object ID of their Bot.
-        # For now, we auto-detect or use a placeholder.
-        agent_id = "THE_OBJECT_ID_OF_YOUR_BOT_IN_AZURE_AD" 
-        raw_data = fetch_real_azure_data()
+        dataset = run_simulation_mode()
 
-    if not raw_data:
-        print("No data found. Exiting.")
+    if not dataset:
+        print("No records generated/fetched. Exiting.")
         return
 
-    # Transform
-    clean_dataset = transform_to_modelop_schema(raw_data, agent_id)
+    # 2. Save Timestamped Output
+    output_dir = CONF['files']['output_folder']
+    os.makedirs(output_dir, exist_ok=True)
     
-    # Load (Save to file)
-    output_file = "modelop_llm_partner_data.json"
-    with open(output_file, "w") as f:
-        json.dump(clean_dataset, f, indent=2)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_filename = f"modelop_llm_data_{timestamp}.json"
+    output_path = os.path.join(output_dir, output_filename)
+    
+    with open(output_path, "w") as f:
+        json.dump(dataset, f, indent=2)
         
     print(f"\n--- SUCCESS ---")
-    print(f"Generated {len(clean_dataset)} interaction records.")
-    print(f"File saved to: {output_file}")
-    print("\nNEXT STEPS (Refer to Partner Demo Lab Guide):")
-    print("1. Log in to https://partner-demo.modelop.center/")
-    print("2. Navigate to 'Inventory' -> 'Add Use Case' (Stage 1)")
-    print("3. Add a Model Implementation (Stage 3)")
-    print(f"4. Upload '{output_file}' as your 'Baseline Data' or 'Comparator Data'")
+    print(f"Generated/Fetched {len(dataset)} records.")
+    print(f"Saved to: {output_path}")
+
+    # 3. Run Smart File Management
+    manage_files(output_path)
+    
+    print("\nDONE. Upload 'baseline_data.json' and 'comparator_data.json' to ModelOp Partner Demo Lab.")
 
 if __name__ == "__main__":
     main()
