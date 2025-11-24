@@ -1,4 +1,4 @@
-# 🌉 ModelOp Bridge: Azure Copilot Governance Connector
+# 🌉 ModelOp Bridge: Azure Copilot Connector
 
 
 ### *Turn on the lights in your "Shadow AI" basement.*
