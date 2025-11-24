@@ -1,6 +1,6 @@
 """
-ModelOp Partner ETL Script: Enterprise Chatbot Data Generator
-=============================================================
+ModelOp Partner Connector: Azure MOC Data Bridge
+================================================
 CONTEXT: ModelOp Partner Demo Lab
 OUTPUT: JSON dataset compatible with ModelOp Standardized Tests.
 
@@ -232,7 +232,7 @@ def generate_base_synthetic_stream() -> List[Dict[str, Any]]:
     
     print(f"  > Generating {count} Base Synthetic Records...")
     stream = []
-    for _ in tqdm(range(count), desc="Base Gen", unit="rec"):
+    for _ in tqdm(range(count), desc="Base Gen", unit="rec", ncols=80):
         topic = random.choice(topics)
         ctx = get_spacy_context()
         user_input = (f"Context: Employee {ctx['employee_name']} in {ctx['department']}.\nTopic: {topic}.\n"
@@ -270,25 +270,39 @@ def run_red_team_layer(stream: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     
     print("\n[RED TEAM LAYER ACTIVE]")
     
-    # 1. EXPANSION
+    # 1. EXPANSION (FIXED LOGIC)
     exp_conf = rt_conf['data_expansion']
     if exp_conf['active']:
         examples = load_expansion_examples(exp_conf['source_file_path'])
         count = exp_conf['num_additional_records']
-        print(f"  > Expanding stream with {count} records mimicking {exp_conf['source_file_path']}...")
-        sys_prompt = "You are a creative data generator. Generate a new Question/Answer pair that mimics the style of the examples."
-        style_str = "\n".join([f"Ex: Q='{e['prompt']}' A='{e['response']}'" for e in examples[:3]])
         
-        for _ in tqdm(range(count), desc="Expanding", unit="rec"):
-            user_prompt = f"Generate 1 new pair.\n{style_str}"
+        # Determine prompt strategy based on whether examples loaded successfully
+        if examples:
+            print(f"  > Expanding stream with {count} records mimicking {exp_conf['source_file_path']}...")
+            style_examples_str = "\n".join([f"Ex: Q='{e['prompt']}' A='{e['response']}'" for e in examples[:3]])
+            style_instruction = "mimics the style and vernacular of the provided examples."
+        else:
+            print(f"  [WARN] Mock expansion file '{exp_conf['source_file_path']}' not found or empty. Using default creative style.")
+            style_examples_str = ""
+            style_instruction = "is realistic for a corporate environment."
+
+        # UPDATED PROMPT: Explicitly enforces JSON structure regardless of examples
+        sys_prompt = (
+            f"You are a creative data generator. Generate a new Question/Answer pair that {style_instruction}\n"
+            "CRITICAL: Output strictly valid JSON with exactly two keys: \"prompt\" and \"response\"."
+        )
+        
+        for _ in tqdm(range(count), desc="Expanding", unit="rec", ncols=80):
+            user_prompt = f"Generate 1 new pair.\n{style_examples_str}"
             data = generate_ollama_json(sys_prompt, user_prompt)
+            # Robust .get() calls ensure blank strings instead of crashes, but prompt enforcement above should prevent this
             wrapped = wrap_in_azure_schema(data.get('prompt', ''), data.get('response', ''))
             stream.append(wrapped)
 
     # 2. DEFECTS
     rates = rt_conf['defect_injection']['rates']
     print("  > Scanning stream for defects...")
-    for record in tqdm(stream, desc="Injecting Defects", unit="rec"):
+    for record in tqdm(stream, desc="Injecting Defects", unit="rec", ncols=80):
         meta = record['_pipeline_meta']
         if meta['is_adversarial']: continue
         defects = []
@@ -312,7 +326,7 @@ def run_red_team_layer(stream: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         count = int((prop * current_len) / (1 - prop)) if prop < 1.0 else 5
         print(f"  > Injecting {count} Adversarial Attack records...")
         techniques = adv_conf['techniques']
-        for _ in tqdm(range(count), desc="Adversarial Gen", unit="atk"):
+        for _ in tqdm(range(count), desc="Adversarial Gen", unit="atk", ncols=80):
             tech = random.choice(techniques)
             atk_prompt = f"Generate a user prompt using technique: '{tech}'. Generate a chatbot response. Return JSON."
             data = generate_ollama_json(CONF['prompts']['red_team_instruction'], atk_prompt)
@@ -322,7 +336,7 @@ def run_red_team_layer(stream: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     # 4. REFERENCE ANSWER
     if rt_conf['generate_reference_answer']:
         print("  > Generating Reference Answers for all records...")
-        for record in tqdm(stream, desc="Ref Answers", unit="rec"):
+        for record in tqdm(stream, desc="Ref Answers", unit="rec", ncols=80):
             curr_q = clean_html(record['user_message']['body']['content'])
             ref_prompt = f"Question: {curr_q}\nTask: Generate a factual Reference Answer."
             data = generate_ollama_json(CONF['prompts']['red_team_instruction'], ref_prompt)
