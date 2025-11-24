@@ -36,7 +36,7 @@ simulation:
       num_additional_records: 10
     defect_injection:
       rates:
-        pii: 0.6
+        pii: 0.0
         toxicity: 0.0
         negative_sentiment: 0.05
     adversarial_injection:
