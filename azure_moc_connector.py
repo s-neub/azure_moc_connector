@@ -1,6 +1,6 @@
 """
-ModelOp Partner Connector: Azure MOC Data Bridge
-================================================
+ModelOp Partner ETL Script: Enterprise Chatbot Data Generator
+=============================================================
 CONTEXT: ModelOp Partner Demo Lab
 OUTPUT: JSON dataset compatible with ModelOp Standardized Tests.
 
