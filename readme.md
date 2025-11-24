@@ -15,7 +15,7 @@ This tool is your **Flashlight**. It is a specialized ETL (Extract, Transform, L
 
 ### 📊 How It Works: The Logic Engine
 
-When you feed data into ModelOp Center (whether real or simulated), it immediately passes through our OOTB Standardized Monitors. The ```llm_data_monitoring_diagram.png``` diagram shows exactly which "lights" turn on based on the data you generate with this tool.
+When you feed data into ModelOp Center (whether real or simulated), it immediately passes through our OOTB Standardized Monitors. The [```llm_data_monitoring_diagram.png```](https://github.com/s-neub/azure_moc_connector/blob/master/llm_data_monitoring_diagram.png) diagram shows exactly which "lights" turn on based on the data you generate with this tool.
 
 ### 📂 Repository Structure
 
