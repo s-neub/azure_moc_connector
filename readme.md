@@ -1,6 +1,5 @@
-<head></head>
+# 🌉 ModelOp Bridge: Azure Copilot Connector
 
-# 🌉 ModelOp Bridge: Azure Copilot Governance Connector
 
 ### *Turn on the lights in your "Shadow AI" basement.*
 
@@ -166,4 +165,37 @@ See `roadmap.md` for full architecture diagrams.
 2. Log into **ModelOp Center**.
 3. Navigate to your **LLM Use Case**.
 4. Upload as **Comparator Data**.
-5. *Watch the magic happen.* 🪄
+5. *Watch the magic happen.* 🪄---
+
+
+### ⚙️ Step 3: Choose Your Adventure (Configuration)
+This script supports three distinct testing phases. Open `config.yaml` to choose your path.
+
+
+#### 🟢 Phase 1: "Kick the Tires" (Fastest)
+*Goal: See the dashboard light up immediately without waiting for data generation.*
+1.  We have included pre-generated files in the `pregenerated_data/` folder.
+2.  In `config.yaml`, set `baseline_source_file` to point to one of these existing files.
+3.  Run the script. It will instantly copy these files to `baseline_data.json` and `comparator_data.json` without running the AI.
+4.  **Upload** these two files to the Partner Demo Lab immediately.
+
+
+#### 🟡 Phase 2: Custom Simulation
+*Goal: Test specific scenarios (e.g., "What if my bot is rude?" or "What if it leaks PII?").*
+1.  In `config.yaml`:
+    * Set `use_real_azure: false`.
+    * Adjust `rates` (e.g., increase `toxicity` to 0.5 to see more red alerts).
+    * Edit the `topics` list to match your industry (e.g., change "VPN" to "Mortgage Rates").
+2.  **Run the script.** It will generate fresh data matching your criteria.
+3.  **Upload** the new `comparator_data.json` to see how the monitors react to your specific data.
+
+
+#### 🔴 Phase 3: Real World Data
+*Goal: Connect to your actual Microsoft 365 Copilot to audit real user interactions.*
+1.  In `config.yaml`:
+    * Set `use_real_azure: true`.
+    * Fill in your `azure` credentials (Tenant ID, Client ID, Secret).
+2.  **Run the script.** It will connect to your Azure tenant, download real chat logs, and format them for ModelOp.
+3.  **Upload** the resulting file to audit your live environment.
+
+---
