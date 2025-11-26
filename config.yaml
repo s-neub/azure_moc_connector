@@ -3,17 +3,10 @@ mode:
   use_ai_generation: true
   ollama_model: qwen2.5
 files:
-  # ARCHIVE: Where timestamped history is saved (e.g., generated_chats/modelop_data_20251121.json)
   output_folder: generated_chats
-  
-  # MASTER FILES: These live in the ROOT directory and are overwritten with the latest data.
-  # ModelOp Center should be configured to look at these specific file paths.
   master_baseline_file: baseline_data.json
   master_comparator_file: comparator_data.json
-  
-  # LOGIC: Should the script automatically overwrite the Master Comparator on every run?
   auto_update_comparator: true
-  
 azure:
   tenant_id: YOUR_TENANT_ID
   client_id: YOUR_CLIENT_ID
@@ -42,7 +35,7 @@ simulation:
     defect_injection:
       rates:
         pii: 0.0
-        toxicity: 0.0
+        toxicity: 0.4
         negative_sentiment: 0.05
     adversarial_injection:
       active: false

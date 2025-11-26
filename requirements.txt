@@ -1,29 +1,32 @@
-requests
-faker
-ollama
-tqdm
-pyyaml
-# Specific versions pinned to avoid "C++ Build Tools" errors on Python 3.8
-cymem==2.0.8
-murmurhash==1.0.10
-preshed==3.0.9
-thinc==8.2.3
-blis==0.7.11
-spacy==3.7.5
+# Core Logic
+spacy>=3.8.2
+ollama>=0.1.0
+requests>=2.31.0
+faker>=20.0.0
+tqdm>=4.66.0
+pyyaml>=6.0.1
 
-# Build dependencies to prevent C++ Compiler errors
-wheel
-setuptools
+# Azure specific (if deploying to Azure Functions)
+azure-functions
+azure-identity
+azure-keyvault-secrets
 
-# Core libraries
-requests
-faker
-ollamatqdmpyyaml
+# Note: We removed strict pins for 'thinc', 'cymem', 'preshed', 'blis', etc.
+# SpaCy 3.8+ will automatically install the correct compatible versions of these for Python 3.12.
 
-# Specific versions pinned to avoid "C++ Build Tools" errors on Python 3.8
-cymem==2.0.8
-murmurhash==1.0.10
-preshed==3.0.9
-thinc==8.2.3
-blis==0.7.11
-spacy==3.7.5
+# # Build dependencies to prevent C++ Compiler errors
+# wheel
+# setuptools
+# # Core Libraries
+# requests
+# faker
+# ollama
+# tqdm
+# pyyaml
+# # Specific versions pinned to avoid "C++ Build Tools" errors on Python 3.8
+# cymem==2.0.8
+# murmurhash==1.0.10
+# preshed==3.0.9
+# thinc==8.2.3
+# blis==0.7.11
+# spacy==3.7.5

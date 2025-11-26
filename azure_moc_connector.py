@@ -7,24 +7,9 @@ OUTPUT: JSON dataset compatible with ModelOp Standardized Tests.
 DESCRIPTION:
     This script acts as a Data Pipeline for ModelOp Center.
     
-    PIPELINE STAGES:
-    1. ACQUISITION (Convergence Point):
-       - Fetches Real Azure Data OR Generates Base Synthetic Data.
-       - CRITICAL: All data leaves this stage wrapped in the standard 
-         Microsoft Graph API JSON Schema (nested 'body', 'from', etc.).
-       
-    2. RED TEAM LAYER (Post-Convergence):
-       - Acting on the standardized stream, this layer applies:
-         a. Data Expansion (Adding records based on file style)
-         b. Defect Injection (Rewriting for PII, Toxicity, Sentiment)
-         c. Adversarial Injection (Adding pure attack records)
-         d. Reference Answer Generation (Optional factual grounding)
-
-    3. ETL & FLATTENING:
-       - Unwraps the Azure Schema into the flat ModelOp Schema for CSV/JSON output.
-
-CONFIGURATION:
-    Managed in 'config.yaml'.
+    UPDATES:
+    - Implements granular checkpointing to allow resuming mid-generation.
+    - Checkpoints are saved as .checkpoint_{STAGE}_{TASK}.jsonl
 """
 
 import json
@@ -70,6 +55,52 @@ except OSError:
     nlp = spacy.load("en_core_web_sm")
 
 # =============================================================================
+#  HELPER: CHECKPOINTING
+# =============================================================================
+
+class GranularCheckpoint:
+    def __init__(self, task_name: str, target_count: int):
+        # Construct unique filename based on Stage (from Env) and Task
+        stage = os.environ.get('CURRENT_STAGE', 'DEFAULT')
+        self.filepath = f".checkpoint_{stage}_{task_name}.jsonl"
+        self.target_count = target_count
+        self.data = []
+        
+        # Load existing
+        if os.path.exists(self.filepath):
+            try:
+                with open(self.filepath, 'r') as f:
+                    for line in f:
+                        if line.strip():
+                            self.data.append(json.loads(line))
+                print(f"  [RESUME] Found partial data for '{task_name}'. Loaded {len(self.data)}/{self.target_count} records.")
+            except Exception:
+                print(f"  [WARN] Corrupt checkpoint for '{task_name}'. Starting fresh.")
+                self.data = []
+
+    def get_start_index(self) -> int:
+        return len(self.data)
+
+    def append(self, record: Dict[str, Any]):
+        self.data.append(record)
+        with open(self.filepath, 'a') as f:
+            f.write(json.dumps(record) + "\n")
+            
+    def get_data(self) -> List[Dict[str, Any]]:
+        return self.data
+    
+    @staticmethod
+    def clear_all_checkpoints():
+        """Deletes all checkpoint files in the current directory."""
+        stage = os.environ.get('CURRENT_STAGE', 'DEFAULT')
+        for f in os.listdir('.'):
+            if f.startswith(f".checkpoint_{stage}") and f.endswith(".jsonl"):
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
+
+# =============================================================================
 #  HELPER: OLLAMA INTERFACE
 # =============================================================================
 
@@ -99,13 +130,9 @@ def get_spacy_context() -> Dict[str, str]:
     return {"employee_name": person[0] if person else raw_name, "department": raw_dept}
 
 def wrap_in_azure_schema(prompt_text: str, response_text: str, is_adversarial: bool = False, technique: str = "N/A") -> Dict[str, Any]:
-    """
-    Standardizes ANY data (Synthetic) into the Microsoft Graph API format.
-    """
     user_id = str(uuid.uuid4())
     bot_id = CONF['simulation']['copilot_agent_id']
     
-    # Construct User Message Object
     user_msg = {
         "id": str(uuid.uuid4()),
         "createdDateTime": datetime.now().isoformat() + "Z",
@@ -113,7 +140,6 @@ def wrap_in_azure_schema(prompt_text: str, response_text: str, is_adversarial: b
         "body": {"contentType": "html", "content": f"<div>{prompt_text}</div>"}
     }
 
-    # Construct Bot Message Object
     bot_msg = {
         "id": str(uuid.uuid4()),
         "createdDateTime": (datetime.now() + timedelta(seconds=2)).isoformat() + "Z",
@@ -137,92 +163,64 @@ def wrap_in_azure_schema(prompt_text: str, response_text: str, is_adversarial: b
 # =============================================================================
 
 def get_azure_access_token() -> str:
-    """Authenticates with Azure AD and retrieves a Bearer token."""
     print("  > Authenticating with Azure Active Directory...")
     creds = CONF['azure']
     url = f"https://login.microsoftonline.com/{creds['tenant_id']}/oauth2/v2.0/token"
-    
     payload = {
         'client_id': creds['client_id'],
         'client_secret': creds['client_secret'],
         'scope': 'https://graph.microsoft.com/.default',
         'grant_type': 'client_credentials'
     }
-    
     try:
         response = requests.post(url, data=payload)
         response.raise_for_status()
         return response.json().get('access_token')
     except Exception as e:
-        print(f"  [ERROR] Azure Auth Failed. Check config.yaml credentials. Details: {e}")
+        print(f"  [ERROR] Azure Auth Failed. Details: {e}")
         return ""
 
 def fetch_real_azure_stream() -> List[Dict[str, Any]]:
-    """
-    Connects to Microsoft Graph API and fetches real chat threads.
-    Wraps them in the internal pipeline structure for Red Teaming.
-    """
     token = get_azure_access_token()
     if not token: return []
-    
     headers = {'Authorization': f'Bearer {token}'}
     bot_id = CONF['azure'].get("bot_user_id")
-    
     print("  > Fetching Chat Threads from Microsoft Graph...")
-    # Note: In production, filter by topic or date would happen here
     chats_url = "https://graph.microsoft.com/v1.0/chats"
-    
     try:
         response = requests.get(chats_url, headers=headers)
-        if response.status_code != 200:
-            print(f"  [ERROR] Graph API Error: {response.text}")
-            return []
+        if response.status_code != 200: return []
         chats = response.json().get('value', [])
-    except Exception as e:
-        print(f"  [ERROR] Connection failed: {e}")
-        return []
+    except Exception: return []
 
-    print(f"  > Processing {len(chats)} threads...")
     stream = []
-    
-    # Process threads to find User -> Bot turn pairs
     for chat in tqdm(chats[:20], desc="Fetching Messages", unit="chat"):
         chat_id = chat['id']
         msgs_url = f"https://graph.microsoft.com/v1.0/chats/{chat_id}/messages?$top=50"
-        
         try:
             msg_resp = requests.get(msgs_url, headers=headers)
             if msg_resp.status_code == 200:
                 messages = msg_resp.json().get('value', [])
-                # Sort by time to reconstruct flow
                 messages.sort(key=lambda x: x.get('createdDateTime', ''))
-                
                 current_user_msg = None
-                
                 for msg in messages:
                     sender_id = msg.get('from', {}).get('user', {}).get('id')
-                    
-                    # Logic: Capture User message, wait for Bot response
                     if sender_id != bot_id:
                         current_user_msg = msg
                     elif sender_id == bot_id and current_user_msg:
-                        # We found a pair! Package it for the pipeline.
                         interaction = {
                             "interaction_id": chat_id,
                             "user_message": current_user_msg,
                             "bot_message": msg,
                             "_pipeline_meta": {
-                                "is_adversarial": False, # Assume real data is clean initially
+                                "is_adversarial": False,
                                 "adversarial_technique": "N/A",
                                 "reference_answer": "N/A"
                             }
                         }
                         stream.append(interaction)
-                        current_user_msg = None # Reset
-                        
-        except Exception:
-            continue
-            
+                        current_user_msg = None
+        except Exception: continue
     return stream
 
 def generate_base_synthetic_stream() -> List[Dict[str, Any]]:
@@ -231,16 +229,24 @@ def generate_base_synthetic_stream() -> List[Dict[str, Any]]:
     prompt_sys = CONF['prompts']['base_system_instruction']
     
     print(f"  > Generating {count} Base Synthetic Records...")
-    stream = []
-    for _ in tqdm(range(count), desc="Base Gen", unit="rec", ncols=80):
+    
+    # CHECKPOINTING
+    ckpt = GranularCheckpoint('base_gen', count)
+    if ckpt.get_start_index() >= count:
+        return ckpt.get_data()
+
+    for _ in tqdm(range(ckpt.get_start_index(), count), desc="Base Gen", unit="rec", ncols=80):
         topic = random.choice(topics)
         ctx = get_spacy_context()
         user_input = (f"Context: Employee {ctx['employee_name']} in {ctx['department']}.\nTopic: {topic}.\n"
                       "Generate a standard employee question and a helpful chatbot response.")
         data = generate_ollama_json(prompt_sys, user_input)
         wrapped_record = wrap_in_azure_schema(data.get('prompt', ''), data.get('response', ''))
-        stream.append(wrapped_record)
-    return stream
+        
+        # Save to checkpoint
+        ckpt.append(wrapped_record)
+        
+    return ckpt.get_data()
 
 # =============================================================================
 #  PHASE 2: RED TEAM LAYER
@@ -270,36 +276,41 @@ def run_red_team_layer(stream: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     
     print("\n[RED TEAM LAYER ACTIVE]")
     
-    # 1. EXPANSION (FIXED LOGIC)
+    # 1. EXPANSION
     exp_conf = rt_conf['data_expansion']
     if exp_conf['active']:
-        examples = load_expansion_examples(exp_conf['source_file_path'])
         count = exp_conf['num_additional_records']
+        examples = load_expansion_examples(exp_conf['source_file_path'])
         
-        # Determine prompt strategy based on whether examples loaded successfully
         if examples:
             print(f"  > Expanding stream with {count} records mimicking {exp_conf['source_file_path']}...")
             style_examples_str = "\n".join([f"Ex: Q='{e['prompt']}' A='{e['response']}'" for e in examples[:3]])
             style_instruction = "mimics the style and vernacular of the provided examples."
         else:
-            print(f"  [WARN] Mock expansion file '{exp_conf['source_file_path']}' not found or empty. Using default creative style.")
+            print(f"  [WARN] Mock file not found. Using default creative style.")
             style_examples_str = ""
             style_instruction = "is realistic for a corporate environment."
 
-        # UPDATED PROMPT: Explicitly enforces JSON structure regardless of examples
         sys_prompt = (
             f"You are a creative data generator. Generate a new Question/Answer pair that {style_instruction}\n"
             "CRITICAL: Output strictly valid JSON with exactly two keys: \"prompt\" and \"response\"."
         )
         
-        for _ in tqdm(range(count), desc="Expanding", unit="rec", ncols=80):
-            user_prompt = f"Generate 1 new pair.\n{style_examples_str}"
-            data = generate_ollama_json(sys_prompt, user_prompt)
-            # Robust .get() calls ensure blank strings instead of crashes, but prompt enforcement above should prevent this
-            wrapped = wrap_in_azure_schema(data.get('prompt', ''), data.get('response', ''))
-            stream.append(wrapped)
+        # CHECKPOINTING FOR EXPANSION
+        ckpt = GranularCheckpoint('expansion', count)
+        # We append NEW records to the checkpoint
+        
+        if ckpt.get_start_index() < count:
+            for _ in tqdm(range(ckpt.get_start_index(), count), desc="Expanding", unit="rec", ncols=80):
+                user_prompt = f"Generate 1 new pair.\n{style_examples_str}"
+                data = generate_ollama_json(sys_prompt, user_prompt)
+                wrapped = wrap_in_azure_schema(data.get('prompt', ''), data.get('response', ''))
+                ckpt.append(wrapped)
+        
+        # Add generated records to main stream
+        stream.extend(ckpt.get_data())
 
-    # 2. DEFECTS
+    # 2. DEFECTS (In-place modification, typically fast, no checkpointing needed)
     rates = rt_conf['defect_injection']['rates']
     print("  > Scanning stream for defects...")
     for record in tqdm(stream, desc="Injecting Defects", unit="rec", ncols=80):
@@ -326,12 +337,19 @@ def run_red_team_layer(stream: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         count = int((prop * current_len) / (1 - prop)) if prop < 1.0 else 5
         print(f"  > Injecting {count} Adversarial Attack records...")
         techniques = adv_conf['techniques']
-        for _ in tqdm(range(count), desc="Adversarial Gen", unit="atk", ncols=80):
-            tech = random.choice(techniques)
-            atk_prompt = f"Generate a user prompt using technique: '{tech}'. Generate a chatbot response. Return JSON."
-            data = generate_ollama_json(CONF['prompts']['red_team_instruction'], atk_prompt)
-            wrapped = wrap_in_azure_schema(data.get('prompt', ''), data.get('response', ''), is_adversarial=True, technique=tech)
-            stream.append(wrapped)
+        
+        # CHECKPOINTING FOR ADVERSARIAL
+        ckpt = GranularCheckpoint('adversarial', count)
+        
+        if ckpt.get_start_index() < count:
+            for _ in tqdm(range(ckpt.get_start_index(), count), desc="Adversarial Gen", unit="atk", ncols=80):
+                tech = random.choice(techniques)
+                atk_prompt = f"Generate a user prompt using technique: '{tech}'. Generate a chatbot response. Return JSON."
+                data = generate_ollama_json(CONF['prompts']['red_team_instruction'], atk_prompt)
+                wrapped = wrap_in_azure_schema(data.get('prompt', ''), data.get('response', ''), is_adversarial=True, technique=tech)
+                ckpt.append(wrapped)
+                
+        stream.extend(ckpt.get_data())
 
     # 4. REFERENCE ANSWER
     if rt_conf['generate_reference_answer']:
@@ -375,25 +393,19 @@ def flatten_azure_to_modelop(stream: List[Dict[str, Any]]) -> List[Dict[str, Any
 # =============================================================================
 
 def manage_master_files(latest_file_path: str):
-    """
-    Updates the ROOT level master files (baseline_data.json / comparator_data.json).
-    """
     print("\n--- MASTER FILE MANAGEMENT ---")
     files_conf = CONF['files']
-    
-    # 1. Update Comparator (The "Variable" file)
     master_comp = files_conf.get('master_comparator_file', 'comparator_data.json')
     if files_conf['auto_update_comparator']:
         shutil.copy(latest_file_path, master_comp)
         print(f"  [UPDATE] Root '{master_comp}' overwritten with latest run data.")
     
-    # 2. Check/Init Baseline (The "Control" file)
     master_base = files_conf.get('master_baseline_file', 'baseline_data.json')
     if not os.path.exists(master_base):
         shutil.copy(latest_file_path, master_base)
-        print(f"  [INIT] Root '{master_base}' was missing. Created using latest data.")
+        print(f"  [INIT] Created '{master_base}'.")
     else:
-        print(f"  [SKIP] Root '{master_base}' exists. (Delete it if you want to regenerate it).")
+        print(f"  [SKIP] '{master_base}' exists.")
 
 # =============================================================================
 #  MAIN
@@ -411,7 +423,7 @@ def main():
         stream = fetch_real_azure_stream()
     else:
         stream = generate_base_synthetic_stream()
-        if not stream: stream = generate_base_synthetic_stream() # Fallback
+        if not stream: stream = generate_base_synthetic_stream()
 
     # 2. RED TEAM
     stream = run_red_team_layer(stream)
@@ -432,8 +444,11 @@ def main():
     print(f"  Adversarial Count: {len([x for x in final_dataset if x['is_adversarial']])}")
     print(f"  Archive Saved: {out_path}")
 
-    # 4. UPDATE MASTER FILES
+    # 4. UPDATE MASTER FILES & CLEANUP
     manage_master_files(out_path)
+    
+    # 5. CLEANUP CHECKPOINTS (Only on success)
+    GranularCheckpoint.clear_all_checkpoints()
 
 if __name__ == "__main__":
     main()

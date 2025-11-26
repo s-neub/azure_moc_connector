@@ -24,7 +24,7 @@ Your enterprise clients are rapidly deploying Microsoft AI tools, but their GRC 
 This script is designed for every stage of your prospect's journey, now featuring a new **"Story Mode"** for instant demos:
 
 1. **Story Mode (Fastest):** Don't have time to install LLMs? Run the `generate_demo_data.py` script. It instantly creates a "Day 1 / Day 2 / Day 3" folder structure with pre-cooked data. Drag and drop these files to show ModelOp catching PII leaks and attacks over time.
-2. **Simulate Data (Deep Dive):** Use `azure_copilot_etl.py` with local AI (Ollama) to generate fresh, randomized conversations. You control the "toxicity" dial in `config.yaml` to make the dashboard light up exactly how you want.
+2. **Simulate Data (Deep Dive):** Use `azure_moc_connector.py` with local AI (Ollama) to generate fresh, randomized conversations. You control the "toxicity" dial in `config.yaml` to make the dashboard light up exactly how you want.
 3. **Connect Real Data (Production):** By toggling a single flag in `config.yaml`, connect to a customer's *actual* Azure Tenant to audit their live Copilot usage.
 
 **Quick Start Steps:**
@@ -39,7 +39,7 @@ This script is designed for every stage of your prospect's journey, now featurin
 
 1. **Install the "Brains":** Install [Ollama](https://ollama.com/ "https://ollama.com/") and pull the model (`ollama pull qwen2.5`).
 2. **Configure:** Edit `config.yaml` to set your desired defect rates (e.g., `toxicity: 0.5`).
-3. **Run:** `python azure_copilot_etl.py`.
+3. **Run:** `python azure_moc_connector.py`.
 4. **Upload:** The script updates `generated_chats/comparator_data.json` for you to upload.
 
 Full instructions are in the **README.md**.
