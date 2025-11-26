@@ -66,23 +66,29 @@ Open your **PowerShell** or **Command Prompt** and paste this command to install
 #### 2. Clone the Repo
 
 1. Open **VS Code**.
-2. Go to **File &gt; New Window** (to ensure a clean slate).
+2. Go to **File > New Window**.
 3. On the "Welcome" screen, click **"Clone Git Repository..."**.
 4. Paste: `https://github.com/s-neub/azure_moc_connector`
 5. Select a folder (e.g., `Documents`) to save it.
 6. **Crucial:** When asked *"Would you like to open the cloned repository?"*, click **Open**.
 
-#### 3. The "One-Command" Environment Setup
+#### 3. Create Virtual Environment
 
-Open the VS Code Terminal (`Ctrl + ~`) and paste this block. It creates the virtual environment (`venv`) using your installed Python, updates setup tools, and installs dependencies automatically.
+VS Code can build the environment for you using the `requirements.txt` file.
 
-**For Windows (PowerShell):**
+1. Open `requirements.txt` in the editor.
+2. Open the Command Palette (`Ctrl+Shift+P`).
+3. Type and select: **Python: Create Environment...**
+4. Select **Venv**.
+5. Select **Python 3.12.x** (The version you just installed).
+6. **Check the list:** Ensure `requirements.txt` is selected (checked).
+7. Click **OK**.
 
-    py -3.8 -m venv venv; .\venv\Scripts\activate; python -m pip install --upgrade pip setuptools wheel; pip install -r requirements.txt; python -m spacy download en_core_web_sm
+#### 4. Final Setup Command
 
-**For Mac/Linux:**
+Once the environment is ready, open a **New Terminal** (`Ctrl + Shift + ~`). You should see `(.venv)` at the start of the line. Run this final command to download the grammar model:
 
-    python3.8 -m venv venv && source venv/bin/activate && pip install --upgrade pip setuptools wheel && pip install -r requirements.txt && python -m spacy download en_core_web_sm
+    python -m spacy download en_core_web_sm
 
 ### 🛠️ Part 2: Get the "Brains" (Ollama)
 
